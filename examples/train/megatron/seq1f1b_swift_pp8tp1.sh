@@ -91,6 +91,7 @@ SUMMARY_SKIP=${SUMMARY_SKIP:-1}
 EVAL_ITERS=${EVAL_ITERS:-0}
 EVAL_INTERVAL=${EVAL_INTERVAL:-100000}
 SAVE_INTERVAL=${SAVE_INTERVAL:-0}
+RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-none}
 
 TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-8}
@@ -108,6 +109,18 @@ CLIP_GRAD=${CLIP_GRAD:-1.0}
 RUN_NAME=${RUN_NAME:-swift_m2p7b_seq${SEQ_LEN}_gbs${GLOBAL_BATCH}_pp${PP_SIZE}tp${TP_SIZE}}
 SAVE=${SAVE:-${SAVE_ROOT}/${RUN_NAME}}
 mkdir -p "${SAVE}" "${MODEL_DIR}"
+
+if [ $((NPROC_PER_NODE % (TP_SIZE * PP_SIZE))) -ne 0 ]; then
+  echo "ERROR: NPROC_PER_NODE (${NPROC_PER_NODE}) must be divisible by TP_SIZE*PP_SIZE ($((TP_SIZE * PP_SIZE)))." >&2
+  exit 1
+fi
+DP_SIZE=$((NPROC_PER_NODE / (TP_SIZE * PP_SIZE)))
+if [ $((GLOBAL_BATCH % (MICRO_BATCH * DP_SIZE))) -ne 0 ]; then
+  echo "ERROR: GLOBAL_BATCH (${GLOBAL_BATCH}) must be divisible by MICRO_BATCH*DP_SIZE ($((MICRO_BATCH * DP_SIZE)))." >&2
+  exit 1
+fi
+NUM_MICROBATCHES=$((GLOBAL_BATCH / (MICRO_BATCH * DP_SIZE)))
+GRADIENT_ACCUMULATION_STEPS=${NUM_MICROBATCHES}
 
 if [ ! -d "${MEGATRON_LM_PATH}/megatron" ]; then
   echo "ERROR: MEGATRON_LM_PATH is not an official Megatron-LM checkout: ${MEGATRON_LM_PATH}" >&2
@@ -213,9 +226,11 @@ echo "  USE_HF=${USE_HF}"
 echo "  MODEL_DIR=${MODEL_DIR}"
 echo "  SAVE=${SAVE}"
 echo "  SAVE_INTERVAL=${SAVE_INTERVAL} (0 disables Megatron weight checkpoints)"
-echo "  GPUs=${NPROC_PER_NODE}, PP=${PP_SIZE}, TP=${TP_SIZE}"
+echo "  GPUs=${NPROC_PER_NODE}, PP=${PP_SIZE}, TP=${TP_SIZE}, DP=${DP_SIZE}"
 echo "  model: L=${NUM_LAYERS}, H=${HIDDEN_SIZE}, heads=${NUM_HEADS}, ffn=${FFN_HIDDEN_SIZE}"
 echo "  seq_len=${SEQ_LEN}, micro=${MICRO_BATCH}, global=${GLOBAL_BATCH}, iters=${TRAIN_ITERS}"
+echo "  num_microbatches=${NUM_MICROBATCHES}, gradient_accumulation_steps=${GRADIENT_ACCUMULATION_STEPS}"
+echo "  recompute_granularity=${RECOMPUTE_GRANULARITY}"
 echo "  summary_skip=${SUMMARY_SKIP}"
 echo "======================================================================"
 
@@ -253,7 +268,7 @@ megatron pt \
   --attention_backend flash \
   --use_distributed_optimizer true \
   --cross_entropy_loss_fusion true \
-  --recompute_granularity selective \
+  --recompute_granularity "${RECOMPUTE_GRANULARITY}" \
   --train_iters "${TRAIN_ITERS}" \
   --eval_iters "${EVAL_ITERS}" \
   --eval_interval "${EVAL_INTERVAL}" \

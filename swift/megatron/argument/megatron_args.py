@@ -48,7 +48,7 @@ class MegatronArguments(ExtraMegatronArguments):
     # training
     micro_batch_size: int = 1
     global_batch_size: int = 16
-    recompute_granularity: Literal['selective', 'full'] = 'selective'
+    recompute_granularity: Literal['none', 'selective', 'full'] = 'selective'
     recompute_method: Literal['uniform', 'block'] = None
     recompute_num_layers: Optional[int] = None
     recompute_modules: List[str] = field(default_factory=lambda: ['core_attn'])
@@ -316,6 +316,9 @@ class MegatronArguments(ExtraMegatronArguments):
             self.eval_interval = self.save_interval
         if self.seq_length is None:
             self.seq_length = self.max_position_embeddings
+        if self.recompute_granularity == 'none':
+            self.recompute_granularity = None
+            self.recompute_modules = None
         if self.tensorboard_dir is None and self.save is not None:
             self.tensorboard_dir = f'{self.save}/runs'
         self._init_moe()
