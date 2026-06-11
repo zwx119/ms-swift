@@ -42,6 +42,7 @@ GLOBAL_BATCH=${GLOBAL_BATCH:-16}
 TRAIN_ITERS=${TRAIN_ITERS:-30}
 WARMUP_ITERS=${WARMUP_ITERS:-4}
 LOG_INTERVAL=${LOG_INTERVAL:-1}
+SUMMARY_SKIP=${SUMMARY_SKIP:-1}
 EVAL_ITERS=${EVAL_ITERS:-0}
 EVAL_INTERVAL=${EVAL_INTERVAL:-100000}
 SAVE_INTERVAL=${SAVE_INTERVAL:-100000}
@@ -144,6 +145,7 @@ echo "  SAVE=${SAVE}"
 echo "  GPUs=${NPROC_PER_NODE}, PP=${PP_SIZE}, TP=${TP_SIZE}"
 echo "  model: L=${NUM_LAYERS}, H=${HIDDEN_SIZE}, heads=${NUM_HEADS}, ffn=${FFN_HIDDEN_SIZE}"
 echo "  seq_len=${SEQ_LEN}, micro=${MICRO_BATCH}, global=${GLOBAL_BATCH}, iters=${TRAIN_ITERS}"
+echo "  summary_skip=${SUMMARY_SKIP}"
 echo "======================================================================"
 
 megatron pt \
@@ -205,19 +207,94 @@ megatron pt \
 
 python3 - <<PY
 from pathlib import Path
+import math
 import re
 
 log_path = Path("${SAVE}") / "train.log"
 seq_len = int("${SEQ_LEN}")
 global_batch = int("${GLOBAL_BATCH}")
-pattern = re.compile(r"elapsed time per iteration \\(ms\\):\\s*([0-9.]+)")
-times = [float(m.group(1)) for line in log_path.read_text(errors="replace").splitlines() for m in [pattern.search(line)] if m]
-if times:
-    # Skip the first logged iteration when possible.
-    used = times[1:] or times
-    avg_ms = sum(used) / len(used)
-    toks = global_batch * seq_len / (avg_ms / 1000.0)
-    print(f"SUMMARY avg_iter_ms={avg_ms:.2f} tokens_per_sec={toks:.2f} log={log_path}")
+summary_skip = int("${SUMMARY_SKIP}")
+text = log_path.read_text(errors="replace")
+lines = text.splitlines()
+
+time_re = re.compile(r"elapsed time per iteration \\(ms\\):\\s*([0-9.]+)")
+tflops_re = re.compile(r"throughput per GPU \\(TFLOP/s/GPU\\):\\s*([0-9.]+)")
+mem_stage_re = re.compile(r"mem_each_stage:\\s*([0-9.,]+)")
+mem_re = re.compile(
+    r"\\[Rank\\s+(?P<rank>\\d+)\\].*?"
+    r"max allocated:\\s*(?P<alloc>[0-9.eE+-]+).*?"
+    r"max reserved:\\s*(?P<reserved>[0-9.eE+-]+)"
+)
+
+times_s = [float(m.group(1)) / 1000.0 for line in lines for m in [time_re.search(line)] if m]
+toks = [global_batch * seq_len / t for t in times_s if t > 0]
+tflops = [float(m.group(1)) for line in lines for m in [tflops_re.search(line)] if m]
+
+mem_each_stage = ""
+for line in lines:
+    m = mem_stage_re.search(line)
+    if m:
+        mem_each_stage = "/".join(m.group(1).split(","))
+
+mem_alloc_mb_by_rank = {}
+mem_reserved_mb_by_rank = {}
+for line in lines:
+    m = mem_re.search(line)
+    if not m:
+        continue
+    rank = int(m.group("rank"))
+    alloc = float(m.group("alloc"))
+    reserved = float(m.group("reserved"))
+    mem_alloc_mb_by_rank[rank] = max(mem_alloc_mb_by_rank.get(rank, 0.0), alloc)
+    mem_reserved_mb_by_rank[rank] = max(mem_reserved_mb_by_rank.get(rank, 0.0), reserved)
+
+def drop_warmup(values):
+    if len(values) > summary_skip:
+        return values[summary_skip:]
+    return values
+
+def mean_std(values):
+    values = list(values)
+    if not values:
+        return None
+    mean = sum(values) / len(values)
+    if len(values) == 1:
+        return mean, 0.0
+    var = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+    return mean, math.sqrt(var)
+
+def pm(values, scale=1.0):
+    stats = mean_std(drop_warmup(values))
+    if stats is None:
+        return "NA"
+    mean, std = stats
+    return f"{mean * scale:.2f}\\u00b1{std * scale:.2f}"
+
+def fmt_mem_gb(mb):
+    gb = mb / 1024.0
+    if gb >= 10:
+        return f"{gb:.1f}"
+    return f"{gb:.2f}"
+
+summary_lines = [
+    f"time:  {pm(times_s)}",
+    f"toks:  {pm(toks)}",
+    f"tflops:  {pm(tflops)}",
+]
+
+if mem_each_stage:
+    summary_lines.append(f"mem_arr:  {mem_each_stage}")
+elif mem_alloc_mb_by_rank:
+    ranks = range(max(mem_alloc_mb_by_rank) + 1)
+    mem_arr = "/".join(fmt_mem_gb(mem_alloc_mb_by_rank[r]) for r in ranks if r in mem_alloc_mb_by_rank)
+    summary_lines.append(f"mem_arr:  {mem_arr}")
 else:
-    print(f"SUMMARY no iteration time found; inspect {log_path}")
+    summary_lines.append("mem_arr:  NA")
+
+summary_lines.append(f"summary_log: {log_path}")
+summary = "\\n".join(summary_lines)
+print(summary)
+
+with log_path.open("a", encoding="utf-8") as f:
+    f.write("\\n" + summary + "\\n")
 PY
