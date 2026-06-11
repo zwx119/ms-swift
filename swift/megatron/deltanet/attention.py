@@ -53,6 +53,9 @@ def _supports_kwarg(fn, name: str) -> bool:
 _CHUNK_DELTA_RULE_FWD_SUPPORTS_HO_PIPELINE = (
     HAS_FLA and _supports_kwarg(chunk_delta_rule_fwd, 'use_ho_pipeline')
 )
+_CHUNK_DELTA_RULE_SUPPORTS_HO_PIPELINE = (
+    HAS_FLA and _supports_kwarg(chunk_delta_rule, 'use_ho_pipeline')
+)
 
 
 class ShortConvChunkFunc(torch.autograd.Function):
@@ -72,7 +75,7 @@ class ShortConvChunkFunc(torch.autograd.Function):
             output_final_state=True,
             activation=activation,
         )
-        cache_dict[name] = final_state
+        cache_dict[name] = final_state.detach()
 
         ctx.save_for_backward(x, weight_dw, bias, initial_state)
         ctx.activation = activation
@@ -141,7 +144,7 @@ class DeltaNetChunkFunc(torch.autograd.Function):
         if _CHUNK_DELTA_RULE_FWD_SUPPORTS_HO_PIPELINE:
             fwd_kwargs['use_ho_pipeline'] = use_ho_pipeline
         o, A, final_state = chunk_delta_rule_fwd(**fwd_kwargs)
-        state_cache['recurrent_state'] = final_state
+        state_cache['recurrent_state'] = final_state.detach()
 
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A)
         ctx.initial_state = initial_state
@@ -432,17 +435,19 @@ class DeltaNetSelfAttention(MegatronModule):
             orig_dtype = q.dtype
             if orig_dtype == torch.float32:
                 q, k, v, beta = q.bfloat16(), k.bfloat16(), v.bfloat16(), beta.bfloat16()
-            out, recurrent_state = chunk_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                beta=beta,
-                scale=self.head_dim**-0.5,
-                initial_state=initial_state,
-                output_final_state=output_final_state,
-                use_qk_l2norm_in_kernel=self.qk_norm == 'l2',
-                use_ho_pipeline=self.use_ho_pipeline,
-            )
+            chunk_kwargs = {
+                'q': q,
+                'k': k,
+                'v': v,
+                'beta': beta,
+                'scale': self.head_dim**-0.5,
+                'initial_state': initial_state,
+                'output_final_state': output_final_state,
+                'use_qk_l2norm_in_kernel': self.qk_norm == 'l2',
+            }
+            if _CHUNK_DELTA_RULE_SUPPORTS_HO_PIPELINE:
+                chunk_kwargs['use_ho_pipeline'] = self.use_ho_pipeline
+            out, recurrent_state = chunk_delta_rule(**chunk_kwargs)
             out = out.to(orig_dtype)
         else:
             raise NotImplementedError(f'DeltaNet mode `{mode}` is not supported.')

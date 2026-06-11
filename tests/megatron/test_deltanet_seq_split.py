@@ -40,7 +40,14 @@ def check_delta_rule(args) -> None:
     beta0 = torch.sigmoid(torch.randn(args.batch, args.seq_len, args.heads, device=device, dtype=dtype))
     dout = torch.randn_like(q0) * 0.2
 
-    for qk_norm in (False, True):
+    if args.qk_norms == 'l2':
+        qk_norm_values = (True,)
+    elif args.qk_norms == 'none':
+        qk_norm_values = (False,)
+    else:
+        qk_norm_values = (False, True)
+
+    for qk_norm in qk_norm_values:
         q_full, k_full, v_full, beta_full = map(_clone_leaf, (q0, k0, v0, beta0))
         out_full = DeltaNetChunkFunc.apply(
             q_full,
@@ -143,6 +150,7 @@ def main() -> None:
     parser.add_argument('--conv-dim', type=int, default=128)
     parser.add_argument('--conv-size', type=int, default=4)
     parser.add_argument('--use-ho-pipeline', action='store_true')
+    parser.add_argument('--qk-norms', choices=['l2', 'none', 'both'], default='l2')
     parser.add_argument('--atol', type=float, default=2e-2)
     parser.add_argument('--rtol', type=float, default=2e-2)
     parser.add_argument('--grad-atol', type=float, default=4e-2)
