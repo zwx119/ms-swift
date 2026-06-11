@@ -84,22 +84,16 @@ class ShortConvChunkFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         x, weight_dw, bias, initial_state = ctx.saved_tensors
+        dht = ctx.grad_dict.pop(ctx.name, None)
         dx, dw, db, _, dh0 = causal_conv1d_bwd(
             x=x,
             dy=dy,
-            dht=None,
+            dht=dht,
             weight=weight_dw,
             bias=bias,
             initial_state=initial_state,
             activation=ctx.activation,
         )
-        d_next_initial_state = ctx.grad_dict.pop(ctx.name, None)
-        if d_next_initial_state is not None:
-            state_width = d_next_initial_state.shape[-1]
-            if state_width > 1:
-                dx[:, -(state_width - 1):, :].add_(
-                    rearrange(d_next_initial_state[:, :, 1:], 'b d w -> b w d').to(dx.dtype)
-                )
         if ctx.had_state and dh0 is not None:
             ctx.grad_dict[ctx.name] = dh0
         return dx, rearrange(dw, 'd w -> d 1 w'), db, None, None, None, None

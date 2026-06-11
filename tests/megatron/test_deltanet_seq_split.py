@@ -93,7 +93,10 @@ def check_delta_rule(args) -> None:
                 )
             )
         out_split = torch.cat(outs, dim=1)
-        (out_split.float() * dout.float()).sum().backward()
+        dout_chunks = [dout[:, start:start + args.chunk_len].contiguous()
+                       for start in range(0, args.seq_len, args.chunk_len)]
+        for idx in reversed(range(len(outs))):
+            outs[idx].backward(dout_chunks[idx], retain_graph=idx > 0)
         grads_split = [x.grad.detach().clone() for x in (q_split, k_split, v_split, beta_split)]
 
         tag = f'delta_rule[qk_norm={qk_norm}]'
@@ -136,7 +139,10 @@ def check_short_conv(args) -> None:
                 )
             )
         out_split = torch.cat(outs, dim=1)
-        (out_split.float() * dout.float()).sum().backward()
+        dout_chunks = [dout[:, start:start + args.chunk_len].contiguous()
+                       for start in range(0, args.seq_len, args.chunk_len)]
+        for idx in reversed(range(len(outs))):
+            outs[idx].backward(dout_chunks[idx], retain_graph=idx > 0)
         grads_split = [x.grad.detach().clone() for x in (x_split, weight_split, bias_split)]
 
         tag = f'short_conv[activation={activation}]'
