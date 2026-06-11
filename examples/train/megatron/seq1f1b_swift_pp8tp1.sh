@@ -90,7 +90,7 @@ LOG_INTERVAL=${LOG_INTERVAL:-1}
 SUMMARY_SKIP=${SUMMARY_SKIP:-1}
 EVAL_ITERS=${EVAL_ITERS:-0}
 EVAL_INTERVAL=${EVAL_INTERVAL:-100000}
-SAVE_INTERVAL=${SAVE_INTERVAL:-100000}
+SAVE_INTERVAL=${SAVE_INTERVAL:-0}
 
 TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-8}
@@ -212,6 +212,7 @@ echo "  DATASET=${DATASET}"
 echo "  USE_HF=${USE_HF}"
 echo "  MODEL_DIR=${MODEL_DIR}"
 echo "  SAVE=${SAVE}"
+echo "  SAVE_INTERVAL=${SAVE_INTERVAL} (0 disables Megatron weight checkpoints)"
 echo "  GPUs=${NPROC_PER_NODE}, PP=${PP_SIZE}, TP=${TP_SIZE}"
 echo "  model: L=${NUM_LAYERS}, H=${HIDDEN_SIZE}, heads=${NUM_HEADS}, ffn=${FFN_HIDDEN_SIZE}"
 echo "  seq_len=${SEQ_LEN}, micro=${MICRO_BATCH}, global=${GLOBAL_BATCH}, iters=${TRAIN_ITERS}"
@@ -268,7 +269,7 @@ megatron pt \
   --log_interval "${LOG_INTERVAL}" \
   --log_throughput true \
   --tensorboard_dir "${SAVE}/tb" \
-  --save "${SAVE}/ckpt" \
+  --save "${SAVE}/meta" \
   --add_version false \
   --no_save_optim true \
   --no_save_rng true \
