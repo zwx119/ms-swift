@@ -16,9 +16,7 @@ import torch
 
 from swift.megatron.deltanet.attention import DeltaNetChunkFunc, ShortConvChunkFunc
 
-from einops import rearrange
 from fla.ops.delta_rule import chunk_delta_rule
-from fla.modules.conv.triton.ops import causal_conv1d_fwd
 
 
 def _supports_kwarg(fn, name: str) -> bool:
@@ -104,19 +102,6 @@ def check_delta_rule(args) -> None:
             _assert_close(f'{tag}/{name}', actual, expected, args.grad_atol, args.grad_rtol)
 
 
-def _conv_full(x, weight, bias, activation):
-    y, _ = causal_conv1d_fwd(
-        x=x,
-        weight=rearrange(weight, 'd 1 w -> d w'),
-        bias=bias,
-        residual=None,
-        initial_state=None,
-        output_final_state=True,
-        activation=activation,
-    )
-    return y
-
-
 def check_short_conv(args) -> None:
     torch.manual_seed(args.seed + 1)
     device = torch.device('cuda')
@@ -129,7 +114,7 @@ def check_short_conv(args) -> None:
 
     for activation in (None, 'silu'):
         x_full, weight_full, bias_full = map(_clone_leaf, (x0, weight0, bias0))
-        out_full = _conv_full(x_full, weight_full, bias_full, activation)
+        out_full = ShortConvChunkFunc.apply(x_full, weight_full, bias_full, {}, {}, 'x', activation)
         (out_full.float() * dout.float()).sum().backward()
         grads_full = [x.grad.detach().clone() for x in (x_full, weight_full, bias_full)]
 
