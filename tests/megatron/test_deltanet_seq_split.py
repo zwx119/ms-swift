@@ -9,22 +9,10 @@ image used by the Seq1F1B experiments.
 """
 
 import argparse
-import inspect
-import math
 
 import torch
 
 from swift.megatron.deltanet.attention import DeltaNetChunkFunc, ShortConvChunkFunc
-
-from fla.ops.delta_rule import chunk_delta_rule
-
-
-def _supports_kwarg(fn, name: str) -> bool:
-    try:
-        parameters = inspect.signature(fn).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(p.name == name or p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
 
 
 def _clone_leaf(x: torch.Tensor) -> torch.Tensor:
@@ -38,23 +26,6 @@ def _assert_close(name: str, actual: torch.Tensor, expected: torch.Tensor, atol:
     print(f'{name}: max_abs={max_abs:.4e}, max_rel={max_rel:.4e}')
     if not torch.allclose(actual.float(), expected.float(), atol=atol, rtol=rtol):
         raise AssertionError(f'{name} mismatch: max_abs={max_abs:.4e}, max_rel={max_rel:.4e}')
-
-
-def _delta_rule_full(q, k, v, beta, scale, qk_norm, use_ho_pipeline):
-    kwargs = dict(
-        q=q,
-        k=k,
-        v=v,
-        beta=beta,
-        scale=scale,
-        initial_state=None,
-        output_final_state=True,
-        use_qk_l2norm_in_kernel=qk_norm,
-    )
-    if _supports_kwarg(chunk_delta_rule, 'use_ho_pipeline'):
-        kwargs['use_ho_pipeline'] = use_ho_pipeline
-    out, _ = chunk_delta_rule(**kwargs)
-    return out
 
 
 def check_delta_rule(args) -> None:
@@ -71,8 +42,17 @@ def check_delta_rule(args) -> None:
 
     for qk_norm in (False, True):
         q_full, k_full, v_full, beta_full = map(_clone_leaf, (q0, k0, v0, beta0))
-        out_full = _delta_rule_full(q_full, k_full, v_full, beta_full, scale, qk_norm, args.use_ho_pipeline)
-        (out_full.float() * dout.float()).sum().backward()
+        out_full = DeltaNetChunkFunc.apply(
+            q_full,
+            k_full,
+            v_full,
+            beta_full,
+            scale,
+            {},
+            qk_norm,
+            args.use_ho_pipeline,
+        )
+        out_full.backward(dout)
         grads_full = [x.grad.detach().clone() for x in (q_full, k_full, v_full, beta_full)]
 
         q_split, k_split, v_split, beta_split = map(_clone_leaf, (q0, k0, v0, beta0))
