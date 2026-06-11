@@ -93,6 +93,7 @@ EVAL_INTERVAL=${EVAL_INTERVAL:-100000}
 SAVE_INTERVAL=${SAVE_INTERVAL:-100000}
 NO_SAVE_MODEL=${NO_SAVE_MODEL:-true}
 RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-none}
+EXTRA_MEGATRON_KWARGS=${EXTRA_MEGATRON_KWARGS:-'{"init_method_std": 0.006, "initial_loss_scale": 65536}'}
 
 TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-8}
@@ -232,6 +233,7 @@ echo "  model: L=${NUM_LAYERS}, H=${HIDDEN_SIZE}, heads=${NUM_HEADS}, ffn=${FFN_
 echo "  seq_len=${SEQ_LEN}, micro=${MICRO_BATCH}, global=${GLOBAL_BATCH}, iters=${TRAIN_ITERS}"
 echo "  num_microbatches=${NUM_MICROBATCHES}, gradient_accumulation_steps=${GRADIENT_ACCUMULATION_STEPS}"
 echo "  recompute_granularity=${RECOMPUTE_GRANULARITY}"
+echo "  extra_megatron_kwargs=${EXTRA_MEGATRON_KWARGS}"
 echo "  summary_skip=${SUMMARY_SKIP}"
 echo "======================================================================"
 
@@ -290,7 +292,7 @@ megatron pt \
   --add_version false \
   --no_save_optim true \
   --no_save_rng true \
-  --extra_megatron_kwargs '{"init_method_std": 0.006, "initial_loss_scale": 65536}' \
+  --extra_megatron_kwargs "${EXTRA_MEGATRON_KWARGS}" \
   2>&1 | tee "${SAVE}/train.log"
 
 python3 - <<PY
