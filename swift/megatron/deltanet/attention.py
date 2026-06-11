@@ -2,6 +2,7 @@
 
 """MCore-compatible DeltaNet attention with Seq1F1B state relay."""
 
+import inspect
 from typing import Optional, Tuple
 import warnings
 
@@ -39,6 +40,19 @@ except ImportError:  # pragma: no cover - validated on GPU image
         'flash-linear-attention (fla) is not installed. '
         'DeltaNet attention can only be constructed after installing fla.'
     )
+
+
+def _supports_kwarg(fn, name: str) -> bool:
+    try:
+        parameters = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == name or p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
+
+
+_CHUNK_DELTA_RULE_FWD_SUPPORTS_HO_PIPELINE = (
+    HAS_FLA and _supports_kwarg(chunk_delta_rule_fwd, 'use_ho_pipeline')
+)
 
 
 class ShortConvChunkFunc(torch.autograd.Function):
@@ -113,18 +127,20 @@ class DeltaNetChunkFunc(torch.autograd.Function):
             q_rstd, k_rstd = None, None
 
         initial_state = state_cache.get('recurrent_state', None)
-        o, A, final_state = chunk_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=True,
-            cu_seqlens=None,
-            chunk_indices=None,
-            use_ho_pipeline=use_ho_pipeline,
-        )
+        fwd_kwargs = {
+            'q': q,
+            'k': k,
+            'v': v,
+            'beta': beta,
+            'scale': scale,
+            'initial_state': initial_state,
+            'output_final_state': True,
+            'cu_seqlens': None,
+            'chunk_indices': None,
+        }
+        if _CHUNK_DELTA_RULE_FWD_SUPPORTS_HO_PIPELINE:
+            fwd_kwargs['use_ho_pipeline'] = use_ho_pipeline
+        o, A, final_state = chunk_delta_rule_fwd(**fwd_kwargs)
         state_cache['recurrent_state'] = final_state
 
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A)
