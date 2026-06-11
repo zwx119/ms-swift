@@ -99,6 +99,7 @@ class MegatronArguments(ExtraMegatronArguments):
     # checkpoint
     save: Optional[str] = None
     save_interval: int = 500
+    no_save_model: bool = False
     no_save_optim: bool = False
     no_save_rng: bool = False
     load: Optional[str] = None
@@ -344,6 +345,9 @@ class MegatronArguments(ExtraMegatronArguments):
         extra_args = {}
         extra_megatron_kwargs = args_dict.pop('extra_megatron_kwargs')
         args_dict.update(extra_megatron_kwargs)
+        no_save_model = args_dict.pop('no_save_model')
+        if no_save_model:
+            args_dict['save'] = None
         for k, value in args_dict.items():
             if k not in MegatronArguments.__annotations__ and k not in extra_megatron_kwargs:
                 extra_args[k] = value
