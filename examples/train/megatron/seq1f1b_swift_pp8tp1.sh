@@ -10,7 +10,7 @@
 # Override examples:
 #   DATASET=/path/to/fineweb-edu-sample-10BT.json bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
 #   DATASET=/path/to/fineweb-edu-sample-10BT.jsonl bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
-#   DATASET=/path/to/000_00000.parquet bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
+#   DATASET=/mnt/hdfs/.../fineweb-edu-sample-10BT/sample/10BT/000_00000.parquet bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
 #   SEQ_LEN=32768 TRAIN_ITERS=30 bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
 
 set -euo pipefail
@@ -39,6 +39,15 @@ discover_local_dataset() {
     "${DATA_ROOT}/fineweb_edu_sample_10BT.json" \
     "${DATA_ROOT}/fineweb_edu_sample_10BT.jsonl" \
     "${DATA_ROOT}/fineweb-edu-sample-10BT.txt"; do
+    if [ -f "${candidate}" ]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  for candidate in \
+    "${DATA_ROOT}/fineweb-edu-sample-10BT/sample/10BT/000_00000.parquet" \
+    "${DATA_ROOT}/fineweb_edu_sample_10BT/sample/10BT/000_00000.parquet"; do
     if [ -f "${candidate}" ]; then
       printf '%s\n' "${candidate}"
       return 0
