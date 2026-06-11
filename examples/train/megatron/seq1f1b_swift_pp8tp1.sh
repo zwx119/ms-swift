@@ -327,14 +327,12 @@ for line in lines:
 mem_alloc_mb_by_rank = {}
 mem_reserved_mb_by_rank = {}
 for line in lines:
-    m = mem_re.search(line)
-    if not m:
-        continue
-    rank = int(m.group("rank"))
-    alloc = float(m.group("alloc"))
-    reserved = float(m.group("reserved"))
-    mem_alloc_mb_by_rank[rank] = max(mem_alloc_mb_by_rank.get(rank, 0.0), alloc)
-    mem_reserved_mb_by_rank[rank] = max(mem_reserved_mb_by_rank.get(rank, 0.0), reserved)
+    for m in mem_re.finditer(line):
+        rank = int(m.group("rank"))
+        alloc = float(m.group("alloc"))
+        reserved = float(m.group("reserved"))
+        mem_alloc_mb_by_rank[rank] = max(mem_alloc_mb_by_rank.get(rank, 0.0), alloc)
+        mem_reserved_mb_by_rank[rank] = max(mem_reserved_mb_by_rank.get(rank, 0.0), reserved)
 
 def drop_warmup(values):
     if len(values) > summary_skip:
