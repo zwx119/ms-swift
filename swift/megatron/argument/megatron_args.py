@@ -335,6 +335,18 @@ class MegatronArguments(ExtraMegatronArguments):
                 raise ValueError('`pipe_sp_splits` must be >= 1.')
             if self.pipe_sp_splits > 1 and self.seq_length % self.pipe_sp_splits != 0:
                 raise ValueError('`seq_length` must be divisible by `pipe_sp_splits` for DeltaNet Seq1F1B.')
+            if self.pipe_sp_splits > 1 and getattr(self, 'packing', False) and 128 % self.pipe_sp_splits != 0:
+                # Swift's Megatron collator pads each packed microbatch to a
+                # multiple of 128 tokens (not to a fixed seq_length), so every
+                # per-batch length is only guaranteed to be divisible by 128.
+                raise ValueError('With `--packing true`, `pipe_sp_splits` must divide 128 '
+                                 '(e.g. 2/4/8/16) so every packed batch can be split evenly.')
+            if self.pipe_sp_splits > 1 and self.recompute_granularity == 'full':
+                # Full recompute replays the layer forward during backward, which
+                # would re-consume/overwrite the cross-chunk recurrent state and
+                # short-conv caches used by the Seq1F1B state relay.
+                raise ValueError('DeltaNet Seq1F1B (`pipe_sp_splits` > 1) is incompatible with '
+                                 '`--recompute_granularity full`. Use `none` (or `selective`).')
             if getattr(self, 'packing', False) and not self.deltanet_allow_packed_seq:
                 logger.warning('DeltaNet recurrent state does not reset at Swift packing boundaries yet. '
                                'Please run DeltaNet scripts with `--packing false` for correctness.')

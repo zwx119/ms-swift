@@ -53,3 +53,30 @@ def reset_seq_split_context() -> None:
 
     set_seq_split_context()
 
+
+# Seq1F1B split progress shared between the schedule patch and the trainer.
+#
+# The schedule decides the global forward order (warmup + 1F1B), while the
+# trainer's ``forward_step`` decides which sequence chunk to feed. Keeping the
+# chunk cursor here (and resetting it at the start of every forward-backward
+# run) guarantees the two can never drift apart, e.g. across evaluation runs,
+# Megatron rerun-state-machine replays, or an aborted iteration.
+_SPLIT_PROGRESS = {
+    'idx': 0,
+    'cached_batch': None,
+}
+
+
+def get_split_progress() -> dict:
+    """Return the mutable per-process split progress."""
+
+    return _SPLIT_PROGRESS
+
+
+def reset_split_progress() -> None:
+    """Reset the chunk cursor before a new forward-backward run."""
+
+    _SPLIT_PROGRESS['idx'] = 0
+    _SPLIT_PROGRESS['cached_batch'] = None
+    reset_seq_split_context()
+

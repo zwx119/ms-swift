@@ -98,6 +98,7 @@ PACKING=${PACKING:-true}
 POSITION_EMBEDDING_TYPE=${POSITION_EMBEDDING_TYPE:-rope}
 USE_FLASH_ATTN=${USE_FLASH_ATTN:-true}
 ATTENTION_BACKEND=${ATTENTION_BACKEND:-flash}
+TRANSFORMER_IMPL=${TRANSFORMER_IMPL:-transformer_engine}
 USE_DELTANET=${USE_DELTANET:-false}
 PIPE_SP_SPLITS=${PIPE_SP_SPLITS:-1}
 DELTANET_MODE=${DELTANET_MODE:-chunk}
@@ -304,6 +305,7 @@ megatron pt \
   --no_initialization false \
   --use_flash_attn "${USE_FLASH_ATTN}" \
   --attention_backend "${ATTENTION_BACKEND}" \
+  --transformer_impl "${TRANSFORMER_IMPL}" \
   --use_distributed_optimizer true \
   --cross_entropy_loss_fusion true \
   "${DELTANET_ARGS[@]}" \

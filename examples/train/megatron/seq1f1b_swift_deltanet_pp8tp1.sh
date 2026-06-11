@@ -17,6 +17,12 @@ export DELTANET_ALLOW_PACKED_SEQ=${DELTANET_ALLOW_PACKED_SEQ:-true}
 export POSITION_EMBEDDING_TYPE=${POSITION_EMBEDDING_TYPE:-none}
 export USE_FLASH_ATTN=${USE_FLASH_ATTN:-false}
 export ATTENTION_BACKEND=${ATTENTION_BACKEND:-unfused}
+# `local` keeps the input LayerNorm as a separate module, so the DeltaNet beta
+# projection sees post-LN hidden states exactly like the Megatron reference,
+# and the strided qkvg ColumnParallelLinear also works for TP>1. With
+# `transformer_engine`, the LN is fused into linear_qkvg and beta would be
+# computed from pre-LN hidden states (a different parameterization).
+export TRANSFORMER_IMPL=${TRANSFORMER_IMPL:-local}
 export RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-none}
 export RUN_NAME=${RUN_NAME:-swift_deltanet_m2p7b_seq${SEQ_LEN:-16384}_gbs${GLOBAL_BATCH:-16}_pp${PP_SIZE:-8}tp${TP_SIZE:-1}_sp${PIPE_SP_SPLITS}}
 

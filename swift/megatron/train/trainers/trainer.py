@@ -9,7 +9,6 @@ import torch
 from megatron.core import mpu
 from megatron.core.enums import ModelType
 from megatron.core.num_microbatches_calculator import get_num_microbatches
-from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.rerun_state_machine import RerunMode, get_rerun_state_machine
 from megatron.core.utils import StragglerDetector
 from megatron.training import ft_integration, get_args, get_timers, is_last_rank, pretrain, print_rank_0, training
@@ -17,7 +16,7 @@ from packaging import version
 from torch.distributed.nn import all_reduce
 
 from swift.utils import get_logger
-from ...deltanet.context import set_seq_split_context
+from ...deltanet.context import get_split_progress, set_seq_split_context
 from ...deltanet.schedule_patch import forward_backward_pipelining_without_interleaving_seq1f1b
 from ..patcher import patch_megatron_data_collator
 from ..utils import get_batch, get_swift_datasets_provider
@@ -30,8 +29,6 @@ class MegatronTrainer:
     def __init__(self, args):
         self.args = args
         self.stimer = StragglerDetector()
-        self._deltanet_cached_batch = None
-        self._deltanet_split_idx = 0
         self._patch_megatron()
 
     @contextmanager
@@ -156,7 +153,9 @@ class MegatronTrainer:
                 if verbose:
                     print_rank_0(f'Evaluating iter {iteration}/{args.eval_iters}')
 
-                forward_backward_func = get_forward_backward_func()
+                # Use the (possibly Seq1F1B-patched) schedule so that DeltaNet
+                # evaluation slices sequence chunks consistently with training.
+                forward_backward_func = self.get_forward_backward_func()
                 # Don't care about timing during evaluation
                 config.timers = None
                 ft_integration.on_eval_step_start()
@@ -275,12 +274,20 @@ class MegatronTrainer:
         return self._origin_get_forward_backward_func()
 
     # Code borrowed from NVIDIA/Megatron-LM
-    def loss_func(self, output_tensor: torch.Tensor, *, loss_mask: torch.Tensor):
+    def loss_func(self,
+                  output_tensor: torch.Tensor,
+                  *,
+                  loss_mask: torch.Tensor,
+                  full_num_tokens: torch.Tensor = None,
+                  num_seq_splits: int = 1):
         """Loss function.
 
         Args:
             output_tensor (torch.Tensor): The tensor with the losses
             loss_mask (torch.Tensor): Used to mask out some portions of the loss
+            full_num_tokens (torch.Tensor): For Seq1F1B sequence splits, the
+                non-padded token count of the *full* (unsliced) sequence.
+            num_seq_splits (int): Seq1F1B ``pipe_sp_splits`` of this run.
 
         Returns:
             the loss scalar for this micro-batch
@@ -343,6 +350,15 @@ class MegatronTrainer:
         else:
             lm_loss = lm_loss.clone()
         local_num_tokens = loss[1].clone().detach().to(torch.int)
+        if (num_seq_splits > 1 and full_num_tokens is not None and not getattr(args, 'calculate_per_token_loss', False)):
+            # Seq1F1B: Megatron's forward_step divides each chunk's loss sum by
+            # its *local* token count and by num_microbatches * num_seq_splits.
+            # To make the summed gradient identical to the unsplit baseline
+            # (chunk_sum / full_tokens / num_microbatches), scale the loss by
+            # the split count and report the full-sequence token count instead.
+            # `reporting_loss` above keeps the true per-chunk statistics.
+            lm_loss = lm_loss * num_seq_splits
+            local_num_tokens = full_num_tokens.clone().detach().to(torch.int)
         return (
             lm_loss,
             local_num_tokens,
@@ -355,20 +371,22 @@ class MegatronTrainer:
         timers = get_timers()
         args = get_args()
         use_deltanet_sp = getattr(args, 'use_deltanet', False) and getattr(args, 'pipe_sp_splits', 1) > 1
+        progress = get_split_progress()
 
         # Get the batch.
         timers('batch-generator', log_level=2).start()
         with self.stimer(bdata=True):
-            if use_deltanet_sp and self._deltanet_cached_batch is not None and self._deltanet_split_idx > 0:
-                data = self._deltanet_cached_batch
+            if use_deltanet_sp and progress['cached_batch'] is not None and progress['idx'] > 0:
+                data = progress['cached_batch']
             else:
                 data = get_batch(data_iterator)
                 if use_deltanet_sp:
-                    self._deltanet_cached_batch = data
+                    progress['cached_batch'] = data
         timers('batch-generator').stop()
 
+        full_num_tokens = None
         if getattr(args, 'use_deltanet', False):
-            data = self._prepare_deltanet_batch(data)
+            data, full_num_tokens = self._prepare_deltanet_batch(data)
         else:
             set_seq_split_context()
 
@@ -376,7 +394,12 @@ class MegatronTrainer:
             output_tensor = model(**data)
         labels = data.get('labels')
         loss_mask = None if labels is None else (labels != -100).float()
-        return output_tensor, partial(self.loss_func, loss_mask=loss_mask)
+        return output_tensor, partial(
+            self.loss_func,
+            loss_mask=loss_mask,
+            full_num_tokens=full_num_tokens,
+            num_seq_splits=getattr(args, 'pipe_sp_splits', 1) if use_deltanet_sp else 1,
+        )
 
     def _prepare_deltanet_batch(self, data):
         args = get_args()
@@ -386,11 +409,13 @@ class MegatronTrainer:
             data = dict(data)
             data['attention_mask'] = None
             data['packed_seq_params'] = None
-            return data
+            return data, None
 
-        micro_sp_idx = self._deltanet_split_idx
+        progress = get_split_progress()
+        micro_sp_idx = progress['idx']
         start = None
         end = None
+        full_num_tokens = None
         sliced = {}
         for key, value in data.items():
             if key in {'input_ids', 'labels', 'position_ids'} and value is not None:
@@ -400,6 +425,8 @@ class MegatronTrainer:
                 chunk = seq_len // pipe_sp_splits
                 start = micro_sp_idx * chunk
                 end = start + chunk
+                if key == 'labels':
+                    full_num_tokens = (value != -100).sum()
                 sliced[key] = value[:, start:end].contiguous()
             elif key == 'attention_mask':
                 sliced[key] = None
@@ -409,10 +436,10 @@ class MegatronTrainer:
                 sliced[key] = value
 
         set_seq_split_context(micro_sp_idx, pipe_sp_splits, start, end)
-        self._deltanet_split_idx = (self._deltanet_split_idx + 1) % pipe_sp_splits
-        if self._deltanet_split_idx == 0:
-            self._deltanet_cached_batch = None
-        return sliced
+        progress['idx'] = (micro_sp_idx + 1) % pipe_sp_splits
+        if progress['idx'] == 0:
+            progress['cached_batch'] = None
+        return sliced, full_num_tokens
 
     def train(self, train_dataset, val_dataset, data_collator):
         args = self.args

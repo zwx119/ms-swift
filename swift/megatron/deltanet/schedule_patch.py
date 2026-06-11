@@ -12,6 +12,8 @@ from megatron.core.transformer.cuda_graphs import create_cudagraphs
 from megatron.core.utils import get_model_config, get_model_type, get_model_xattn
 from megatron.training import get_args
 
+from .context import reset_split_progress
+
 
 class SeqSplitQueue:
     """FIFO across microbatches, LIFO across sequence splits of one microbatch."""
@@ -68,6 +70,9 @@ def forward_backward_pipelining_without_interleaving_seq1f1b(
     pipe_sp_splits = getattr(args, 'pipe_sp_splits', 1)
     assert pipe_sp_splits > 1
     assert seq_length % pipe_sp_splits == 0
+    # Every forward-backward run must start from chunk 0 of a fresh batch,
+    # otherwise the data slicing in the trainer would desync from the schedule.
+    reset_split_progress()
     local_seq_length = seq_length // pipe_sp_splits
     total_num_microbatches = num_microbatches * pipe_sp_splits
 
