@@ -2,6 +2,7 @@
 from swift.llm import ModelType
 from ..constant import MegatronModelType
 from ..register import MegatronModelMeta, register_megatron_model
+from ...deltanet.arguments import add_deltanet_args
 from .config import convert_gpt_hf_config
 from .hf2mcore import convert_hf2mcore
 from .mcore2hf import convert_mcore2hf
@@ -48,4 +49,4 @@ register_megatron_model(
         ModelType.deepseek_r1,
         ModelType.dots1,
         ModelType.ernie,
-    ], model_provider, convert_gpt_hf_config, convert_mcore2hf, convert_hf2mcore))
+    ], model_provider, convert_gpt_hf_config, convert_mcore2hf, convert_hf2mcore, add_deltanet_args))

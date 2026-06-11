@@ -69,7 +69,18 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         if args.spec is not None:
             transformer_layer_spec = import_module(args.spec)
         else:
-            if args.num_experts:
+            if getattr(args, 'use_deltanet', False):
+                from ...deltanet.spec import get_deltanet_gpt_layer_spec
+                transformer_layer_spec = get_deltanet_gpt_layer_spec(
+                    use_transformer_engine=use_te,
+                    normalization=args.normalization,
+                    num_experts=args.num_experts,
+                    moe_grouped_gemm=args.moe_grouped_gemm,
+                    qk_layernorm=args.qk_layernorm,
+                    multi_latent_attention=args.multi_latent_attention,
+                    moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                )
+            elif args.num_experts:
                 # Define the decoder block spec
                 transformer_layer_spec = get_gpt_decoder_block_spec(
                     config, use_transformer_engine=use_te, normalization=args.normalization)

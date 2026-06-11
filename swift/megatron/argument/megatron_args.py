@@ -220,6 +220,19 @@ class MegatronArguments(ExtraMegatronArguments):
     num_workers: int = 4
     no_create_attention_mask_in_dataloader: bool = True
 
+    # DeltaNet / Seq1F1B experiments
+    use_deltanet: bool = False
+    pipe_sp_splits: int = 1
+    deltanet_mode: Literal['chunk', 'fused_recurrent'] = 'chunk'
+    deltanet_use_short_conv: bool = True
+    deltanet_conv_size: int = 4
+    deltanet_use_beta: bool = True
+    deltanet_use_output_gate: bool = True
+    deltanet_qk_activation: Literal['silu', 'relu', 'elu', 'none'] = 'silu'
+    deltanet_qk_norm: Literal['l2', 'none'] = 'l2'
+    deltanet_fused_h_o_pipeline: bool = False
+    deltanet_allow_packed_seq: bool = False
+
     # extra_args for megatron
     extra_megatron_kwargs: Optional[Union[dict, str]] = None
 
@@ -317,6 +330,14 @@ class MegatronArguments(ExtraMegatronArguments):
             self.eval_interval = self.save_interval
         if self.seq_length is None:
             self.seq_length = self.max_position_embeddings
+        if self.use_deltanet:
+            if self.pipe_sp_splits < 1:
+                raise ValueError('`pipe_sp_splits` must be >= 1.')
+            if self.pipe_sp_splits > 1 and self.seq_length % self.pipe_sp_splits != 0:
+                raise ValueError('`seq_length` must be divisible by `pipe_sp_splits` for DeltaNet Seq1F1B.')
+            if getattr(self, 'packing', False) and not self.deltanet_allow_packed_seq:
+                logger.warning('DeltaNet recurrent state does not reset at Swift packing boundaries yet. '
+                               'Please run DeltaNet scripts with `--packing false` for correctness.')
         if self.recompute_granularity == 'none':
             self.recompute_granularity = None
             self.recompute_modules = None

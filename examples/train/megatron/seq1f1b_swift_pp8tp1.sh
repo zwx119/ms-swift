@@ -94,6 +94,20 @@ SAVE_INTERVAL=${SAVE_INTERVAL:-100000}
 NO_SAVE_MODEL=${NO_SAVE_MODEL:-true}
 RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-none}
 EXTRA_MEGATRON_KWARGS=${EXTRA_MEGATRON_KWARGS:-'{"init_method_std": 0.006, "initial_loss_scale": 65536}'}
+PACKING=${PACKING:-true}
+POSITION_EMBEDDING_TYPE=${POSITION_EMBEDDING_TYPE:-rope}
+USE_FLASH_ATTN=${USE_FLASH_ATTN:-true}
+ATTENTION_BACKEND=${ATTENTION_BACKEND:-flash}
+USE_DELTANET=${USE_DELTANET:-false}
+PIPE_SP_SPLITS=${PIPE_SP_SPLITS:-1}
+DELTANET_MODE=${DELTANET_MODE:-chunk}
+DELTANET_USE_SHORT_CONV=${DELTANET_USE_SHORT_CONV:-true}
+DELTANET_CONV_SIZE=${DELTANET_CONV_SIZE:-4}
+DELTANET_USE_BETA=${DELTANET_USE_BETA:-true}
+DELTANET_USE_OUTPUT_GATE=${DELTANET_USE_OUTPUT_GATE:-true}
+DELTANET_QK_ACTIVATION=${DELTANET_QK_ACTIVATION:-silu}
+DELTANET_QK_NORM=${DELTANET_QK_NORM:-l2}
+DELTANET_ALLOW_PACKED_SEQ=${DELTANET_ALLOW_PACKED_SEQ:-false}
 
 TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-8}
@@ -232,10 +246,31 @@ echo "  GPUs=${NPROC_PER_NODE}, PP=${PP_SIZE}, TP=${TP_SIZE}, DP=${DP_SIZE}"
 echo "  model: L=${NUM_LAYERS}, H=${HIDDEN_SIZE}, heads=${NUM_HEADS}, ffn=${FFN_HIDDEN_SIZE}"
 echo "  seq_len=${SEQ_LEN}, micro=${MICRO_BATCH}, global=${GLOBAL_BATCH}, iters=${TRAIN_ITERS}"
 echo "  num_microbatches=${NUM_MICROBATCHES}, gradient_accumulation_steps=${GRADIENT_ACCUMULATION_STEPS}"
+if [ "${USE_DELTANET}" = "true" ]; then
+  echo "  seq1f1b_pipeline_chunks=$((NUM_MICROBATCHES * PIPE_SP_SPLITS))"
+fi
 echo "  recompute_granularity=${RECOMPUTE_GRANULARITY}"
+echo "  packing=${PACKING}, position_embedding_type=${POSITION_EMBEDDING_TYPE}"
+echo "  use_deltanet=${USE_DELTANET}, pipe_sp_splits=${PIPE_SP_SPLITS}, deltanet_mode=${DELTANET_MODE}"
 echo "  extra_megatron_kwargs=${EXTRA_MEGATRON_KWARGS}"
 echo "  summary_skip=${SUMMARY_SKIP}"
 echo "======================================================================"
+
+DELTANET_ARGS=()
+if [ "${USE_DELTANET}" = "true" ]; then
+  DELTANET_ARGS+=(
+    --use_deltanet true
+    --pipe_sp_splits "${PIPE_SP_SPLITS}"
+    --deltanet_mode "${DELTANET_MODE}"
+    --deltanet_use_short_conv "${DELTANET_USE_SHORT_CONV}"
+    --deltanet_conv_size "${DELTANET_CONV_SIZE}"
+    --deltanet_use_beta "${DELTANET_USE_BETA}"
+    --deltanet_use_output_gate "${DELTANET_USE_OUTPUT_GATE}"
+    --deltanet_qk_activation "${DELTANET_QK_ACTIVATION}"
+    --deltanet_qk_norm "${DELTANET_QK_NORM}"
+    --deltanet_allow_packed_seq "${DELTANET_ALLOW_PACKED_SEQ}"
+  )
+fi
 
 megatron pt \
   --model "${MODEL_DIR}" \
@@ -243,7 +278,7 @@ megatron pt \
   --dataset "${DATASET}" \
   --use_hf "${USE_HF}" \
   --streaming "${STREAMING}" \
-  --packing true \
+  --packing "${PACKING}" \
   --tensor_model_parallel_size "${TP_SIZE}" \
   --pipeline_model_parallel_size "${PP_SIZE}" \
   --micro_batch_size "${MICRO_BATCH}" \
@@ -257,7 +292,7 @@ megatron pt \
   --seq_length "${SEQ_LEN}" \
   --max_length "${SEQ_LEN}" \
   --max_position_embeddings "${SEQ_LEN}" \
-  --position_embedding_type rope \
+  --position_embedding_type "${POSITION_EMBEDDING_TYPE}" \
   --normalization LayerNorm \
   --swiglu false \
   --disable_bias_linear false \
@@ -267,10 +302,11 @@ megatron pt \
   --hidden_dropout 0 \
   --bf16 true \
   --no_initialization false \
-  --use_flash_attn true \
-  --attention_backend flash \
+  --use_flash_attn "${USE_FLASH_ATTN}" \
+  --attention_backend "${ATTENTION_BACKEND}" \
   --use_distributed_optimizer true \
   --cross_entropy_loss_fusion true \
+  "${DELTANET_ARGS[@]}" \
   --recompute_granularity "${RECOMPUTE_GRANULARITY}" \
   --train_iters "${TRAIN_ITERS}" \
   --eval_iters "${EVAL_ITERS}" \

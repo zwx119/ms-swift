@@ -17,6 +17,8 @@ from packaging import version
 from torch.distributed.nn import all_reduce
 
 from swift.utils import get_logger
+from ...deltanet.context import set_seq_split_context
+from ...deltanet.schedule_patch import forward_backward_pipelining_without_interleaving_seq1f1b
 from ..patcher import patch_megatron_data_collator
 from ..utils import get_batch, get_swift_datasets_provider
 
@@ -28,6 +30,8 @@ class MegatronTrainer:
     def __init__(self, args):
         self.args = args
         self.stimer = StragglerDetector()
+        self._deltanet_cached_batch = None
+        self._deltanet_split_idx = 0
         self._patch_megatron()
 
     @contextmanager
@@ -251,12 +255,24 @@ class MegatronTrainer:
         # support max_epochs
         self._origin_train_step = training.train_step
         training.train_step = self.train_step
+        self._origin_get_forward_backward_func = training.get_forward_backward_func
+        training.get_forward_backward_func = self.get_forward_backward_func
         training.cyclic_iter = self.new_cyclic_iter
         # patch training_log
         self._origin_training_log = training.training_log
         # patch evaluate
         self._origin_evaluate = training.evaluate
         training.evaluate = self.evaluate
+
+    def get_forward_backward_func(self):
+        args = get_args()
+        if getattr(args, 'use_deltanet', False) and getattr(args, 'pipe_sp_splits', 1) > 1:
+            if mpu.get_pipeline_model_parallel_world_size() <= 1:
+                raise ValueError('DeltaNet Seq1F1B currently requires pipeline_model_parallel_size > 1.')
+            if mpu.get_virtual_pipeline_model_parallel_world_size() is not None:
+                raise ValueError('DeltaNet Seq1F1B patch currently supports non-interleaved PP only.')
+            return forward_backward_pipelining_without_interleaving_seq1f1b
+        return self._origin_get_forward_backward_func()
 
     # Code borrowed from NVIDIA/Megatron-LM
     def loss_func(self, output_tensor: torch.Tensor, *, loss_mask: torch.Tensor):
@@ -337,18 +353,66 @@ class MegatronTrainer:
 
     def forward_step(self, data_iterator, model):
         timers = get_timers()
+        args = get_args()
+        use_deltanet_sp = getattr(args, 'use_deltanet', False) and getattr(args, 'pipe_sp_splits', 1) > 1
 
         # Get the batch.
         timers('batch-generator', log_level=2).start()
         with self.stimer(bdata=True):
-            data = get_batch(data_iterator)
+            if use_deltanet_sp and self._deltanet_cached_batch is not None and self._deltanet_split_idx > 0:
+                data = self._deltanet_cached_batch
+            else:
+                data = get_batch(data_iterator)
+                if use_deltanet_sp:
+                    self._deltanet_cached_batch = data
         timers('batch-generator').stop()
+
+        if getattr(args, 'use_deltanet', False):
+            data = self._prepare_deltanet_batch(data)
+        else:
+            set_seq_split_context()
 
         with self.stimer:
             output_tensor = model(**data)
         labels = data.get('labels')
         loss_mask = None if labels is None else (labels != -100).float()
         return output_tensor, partial(self.loss_func, loss_mask=loss_mask)
+
+    def _prepare_deltanet_batch(self, data):
+        args = get_args()
+        pipe_sp_splits = getattr(args, 'pipe_sp_splits', 1)
+        if pipe_sp_splits <= 1:
+            set_seq_split_context(0, 1)
+            data = dict(data)
+            data['attention_mask'] = None
+            data['packed_seq_params'] = None
+            return data
+
+        micro_sp_idx = self._deltanet_split_idx
+        start = None
+        end = None
+        sliced = {}
+        for key, value in data.items():
+            if key in {'input_ids', 'labels', 'position_ids'} and value is not None:
+                seq_len = value.shape[1]
+                if seq_len % pipe_sp_splits != 0:
+                    raise ValueError(f'{key} sequence length {seq_len} is not divisible by {pipe_sp_splits}.')
+                chunk = seq_len // pipe_sp_splits
+                start = micro_sp_idx * chunk
+                end = start + chunk
+                sliced[key] = value[:, start:end].contiguous()
+            elif key == 'attention_mask':
+                sliced[key] = None
+            elif key == 'packed_seq_params':
+                sliced[key] = None
+            else:
+                sliced[key] = value
+
+        set_seq_split_context(micro_sp_idx, pipe_sp_splits, start, end)
+        self._deltanet_split_idx = (self._deltanet_split_idx + 1) % pipe_sp_splits
+        if self._deltanet_split_idx == 0:
+            self._deltanet_cached_batch = None
+        return sliced
 
     def train(self, train_dataset, val_dataset, data_collator):
         args = self.args
