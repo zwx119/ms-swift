@@ -69,10 +69,10 @@ def check_delta_rule(args) -> None:
             end = start + args.chunk_len
             outs.append(
                 DeltaNetChunkFunc.apply(
-                    q_split[:, start:end],
-                    k_split[:, start:end],
-                    v_split[:, start:end],
-                    beta_split[:, start:end],
+                    q_split[:, start:end].contiguous(),
+                    k_split[:, start:end].contiguous(),
+                    v_split[:, start:end].contiguous(),
+                    beta_split[:, start:end].contiguous(),
                     scale,
                     state_cache,
                     qk_norm,
