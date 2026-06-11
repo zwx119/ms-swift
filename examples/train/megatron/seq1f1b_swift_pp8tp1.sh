@@ -8,7 +8,8 @@
 #   - GPT-2 BPE tokenizer files from the stateflow data root
 #
 # Override examples:
-#   DATASET=/path/to/fineweb_swift.jsonl bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
+#   DATASET=/path/to/fineweb-edu-sample-10BT.jsonl bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
+#   DATASET=/path/to/000_00000.parquet bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
 #   SEQ_LEN=32768 TRAIN_ITERS=30 bash examples/train/megatron/seq1f1b_swift_pp8tp1.sh
 
 set -euo pipefail
@@ -29,9 +30,32 @@ MERGE=${MERGE:-${DATA_ROOT}/gpt2/gpt2-merges.txt}
 
 # Swift consumes HF/ModelScope/local jsonl/txt/parquet datasets via --dataset.
 # The Megatron .bin/.idx DATA_PREFIX used by stateflow is not accepted here.
-DATASET=${DATASET:-HuggingFaceFW/fineweb-edu:sample-10BT}
-USE_HF=${USE_HF:-true}
+discover_local_dataset() {
+  local candidate
+  for candidate in \
+    "${DATA_ROOT}/fineweb-edu-sample-10BT.jsonl" \
+    "${DATA_ROOT}/fineweb_edu_sample_10BT.jsonl" \
+    "${DATA_ROOT}/fineweb-edu-sample-10BT.txt"; do
+    if [ -f "${candidate}" ]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  candidate=$(find "${DATA_ROOT}" -maxdepth 5 -type f \
+    \( -name '*.jsonl' -o -name '*.parquet' -o -name '*.txt' \) \
+    2>/dev/null | head -n 1 || true)
+  if [ -n "${candidate}" ]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  return 1
+}
+
+DATASET=${DATASET:-$(discover_local_dataset || true)}
+USE_HF=${USE_HF:-false}
 STREAMING=${STREAMING:-true}
+ALLOW_REMOTE_DATASET=${ALLOW_REMOTE_DATASET:-false}
 
 MODEL_DIR=${MODEL_DIR:-/opt/tiger/swift-gpt2-2p7b-config}
 SAVE_ROOT=${SAVE_ROOT:-/opt/tiger/swift_runs}
@@ -74,6 +98,31 @@ if [ ! -f "${VOCAB}" ] || [ ! -f "${MERGE}" ]; then
   echo "ERROR: GPT-2 vocab/merges missing." >&2
   echo "  VOCAB=${VOCAB}" >&2
   echo "  MERGE=${MERGE}" >&2
+  exit 1
+fi
+
+DATASET_PATH_FOR_CHECK="${DATASET%%#*}"
+DATASET_PATH_FOR_CHECK="${DATASET_PATH_FOR_CHECK%%:*}"
+if [ -z "${DATASET}" ]; then
+  echo "ERROR: DATASET is empty and no local jsonl/parquet/txt was found under DATA_ROOT." >&2
+  echo "  DATA_ROOT=${DATA_ROOT}" >&2
+  echo "Find a local Swift-readable source with:" >&2
+  echo "  find ${DATA_ROOT} -maxdepth 5 -type f \\( -name '*.jsonl' -o -name '*.parquet' -o -name '*.txt' \\) | head" >&2
+  echo "Then run with DATASET=/path/to/file USE_HF=false." >&2
+  echo "Note: Megatron .bin/.idx files are not accepted by Swift's --dataset path." >&2
+  exit 1
+elif [ -e "${DATASET_PATH_FOR_CHECK}" ]; then
+  :
+elif [[ "${DATASET}" == /* || "${DATASET}" == ./* || "${DATASET}" == ../* ]]; then
+  echo "ERROR: local DATASET path does not exist: ${DATASET_PATH_FOR_CHECK}" >&2
+  echo "Set DATASET to a local jsonl/parquet/txt file or folder. For example:" >&2
+  echo "  DATASET=${DATA_ROOT}/fineweb-edu-sample-10BT.jsonl USE_HF=false bash $0" >&2
+  echo "Note: ${DATA_ROOT}/fineweb_edu_sample_10BT_text_document.{bin,idx} is for Megatron only, not Swift." >&2
+  exit 1
+elif [ "${ALLOW_REMOTE_DATASET}" != "true" ]; then
+  echo "ERROR: DATASET is not a local path: ${DATASET}" >&2
+  echo "This GPU environment appears offline; pass a local jsonl/parquet/txt path instead." >&2
+  echo "If you intentionally want a hub dataset, set ALLOW_REMOTE_DATASET=true and USE_HF=true/false." >&2
   exit 1
 fi
 
