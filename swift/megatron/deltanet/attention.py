@@ -2,7 +2,7 @@
 
 """MCore-compatible DeltaNet attention with Seq1F1B state relay."""
 
-import inspect
+import math
 from typing import Optional, Tuple
 import warnings
 
@@ -30,8 +30,8 @@ try:
     from fla.modules import FusedRMSNormGated, RMSNorm as FLARMSNorm, ShortConvolution
     from fla.modules.conv.triton.ops import causal_conv1d_bwd, causal_conv1d_fwd
     from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-    from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
-    from fla.ops.delta_rule.chunk import chunk_delta_rule_bwd, chunk_delta_rule_fwd
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+    from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd, chunk_gated_delta_rule_fwd
 
     HAS_FLA = True
 except ImportError:  # pragma: no cover - validated on GPU image
@@ -40,22 +40,6 @@ except ImportError:  # pragma: no cover - validated on GPU image
         'flash-linear-attention (fla) is not installed. '
         'DeltaNet attention can only be constructed after installing fla.'
     )
-
-
-def _supports_kwarg(fn, name: str) -> bool:
-    try:
-        parameters = inspect.signature(fn).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(p.name == name or p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters)
-
-
-_CHUNK_DELTA_RULE_FWD_SUPPORTS_HO_PIPELINE = (
-    HAS_FLA and _supports_kwarg(chunk_delta_rule_fwd, 'use_ho_pipeline')
-)
-_CHUNK_DELTA_RULE_SUPPORTS_HO_PIPELINE = (
-    HAS_FLA and _supports_kwarg(chunk_delta_rule, 'use_ho_pipeline')
-)
 
 
 class ShortConvChunkFunc(torch.autograd.Function):
@@ -106,7 +90,7 @@ class ShortConvChunkFunc(torch.autograd.Function):
 
 
 class DeltaNetChunkFunc(torch.autograd.Function):
-    """FLA chunk delta rule with explicit recurrent-state gradient relay.
+    """FLA chunk gated delta rule with explicit recurrent-state gradient relay.
 
     The recurrent state is intentionally kept in ``state_cache`` instead of
     being passed as a tensor argument. That prevents autograd from wiring chunk
@@ -120,11 +104,11 @@ class DeltaNetChunkFunc(torch.autograd.Function):
         q,
         k,
         v,
+        recurrent_gate,
         beta,
         scale,
         state_cache,
         use_qk_l2norm_in_kernel,
-        use_ho_pipeline,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -133,26 +117,24 @@ class DeltaNetChunkFunc(torch.autograd.Function):
             q_rstd, k_rstd = None, None
 
         initial_state = state_cache.get('recurrent_state', None)
-        fwd_kwargs = {
-            'q': q,
-            'k': k,
-            'v': v,
-            'beta': beta,
-            'scale': scale,
-            'initial_state': initial_state,
-            'output_final_state': True,
-            'cu_seqlens': None,
-            'chunk_indices': None,
-        }
-        if _CHUNK_DELTA_RULE_FWD_SUPPORTS_HO_PIPELINE:
-            fwd_kwargs['use_ho_pipeline'] = use_ho_pipeline
-        o, A, final_state = chunk_delta_rule_fwd(**fwd_kwargs)
+        recurrent_gate, o, A, final_state, initial_state = chunk_gated_delta_rule_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=recurrent_gate,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=None,
+            chunk_indices=None,
+        )
         # Match the stateflow pattern: recurrent state is relayed through a
         # Python dict, outside autograd's tensor-argument graph. Its gradient is
         # passed manually via state_cache['d_state'] in backward().
         state_cache['recurrent_state'] = final_state
 
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, recurrent_gate, beta, A)
         ctx.initial_state = initial_state
         ctx.scale = scale
         ctx.state_cache = state_cache
@@ -162,12 +144,13 @@ class DeltaNetChunkFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do):
         dht = ctx.state_cache.pop('d_state', None)
-        q, q_rstd, k, k_rstd, v, beta, A = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, recurrent_gate, beta, A = ctx.saved_tensors
 
-        dq, dk, dv, db, dh0 = chunk_delta_rule_bwd(
+        dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
             q=q,
             k=k,
             v=v,
+            g=recurrent_gate,
             beta=beta,
             A=A,
             scale=ctx.scale,
@@ -183,7 +166,16 @@ class DeltaNetChunkFunc(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, None, None, None
+        return (
+            dq.to(q.dtype),
+            dk.to(k.dtype),
+            dv.to(v.dtype),
+            dg.to(recurrent_gate.dtype),
+            db.to(beta.dtype),
+            None,
+            None,
+            None,
+        )
 
 
 class DeltaNetSelfAttention(MegatronModule):
@@ -294,6 +286,21 @@ class DeltaNetSelfAttention(MegatronModule):
         if self.use_beta:
             self.b_proj = nn.Linear(self.hidden_size, self.num_attention_heads_per_partition, bias=False)
 
+        self.a_proj = nn.Linear(self.hidden_size, self.num_attention_heads_per_partition, bias=False)
+        A = torch.empty(self.num_attention_heads_per_partition, dtype=torch.float32).uniform_(0, 16)
+        self.A_log = nn.Parameter(torch.log(A))
+        self.A_log._no_weight_decay = True
+        dt_min = 0.001
+        dt_max = 0.1
+        dt_init_floor = 1e-4
+        dt = torch.exp(
+            torch.rand(self.num_attention_heads_per_partition) * (math.log(dt_max) - math.log(dt_min))
+            + math.log(dt_min)
+        )
+        dt = torch.clamp(dt, min=dt_init_floor)
+        self.dt_bias = nn.Parameter(dt + torch.log(-torch.expm1(-dt)))
+        self.dt_bias._no_weight_decay = True
+
         if self.use_short_conv:
             qk_act = 'silu' if self.qk_activation == 'silu' else None
             self.q_conv1d = ShortConvolution(
@@ -345,17 +352,17 @@ class DeltaNetSelfAttention(MegatronModule):
     def _project_qkvg(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         if self.use_gate:
             qkvg, _ = self.linear_qkvg(hidden_states)
-            q, k, v, g = torch.chunk(qkvg, 4, dim=-1)
+            q, k, v, output_gate = torch.chunk(qkvg, 4, dim=-1)
         else:
             q, _ = self.linear_q(hidden_states)
             k, _ = self.linear_k(hidden_states)
             v, _ = self.linear_v(hidden_states)
-            g = None
+            output_gate = None
         return (
             q.transpose(0, 1).contiguous(),
             k.transpose(0, 1).contiguous(),
             v.transpose(0, 1).contiguous(),
-            None if g is None else g.transpose(0, 1).contiguous(),
+            None if output_gate is None else output_gate.transpose(0, 1).contiguous(),
         )
 
     def _hidden_states_for_beta(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -406,7 +413,10 @@ class DeltaNetSelfAttention(MegatronModule):
                 k = F.elu(k, 1.0, False) + 1.0
         return q, k, v
 
-    def _delta_rule(self, q, k, v, beta, output_final_state: bool) -> torch.Tensor:
+    def _recurrent_gate(self, hidden_states_bsh: torch.Tensor) -> torch.Tensor:
+        return -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states_bsh).float() + self.dt_bias)
+
+    def _delta_rule(self, q, k, v, recurrent_gate, beta, output_final_state: bool) -> torch.Tensor:
         seq_len = q.shape[1]
         mode = 'fused_recurrent' if seq_len <= 64 else self.deltanet_mode
         initial_state = self.state_cache.get('recurrent_state', None)
@@ -419,19 +429,20 @@ class DeltaNetSelfAttention(MegatronModule):
                 q,
                 k,
                 v,
+                recurrent_gate,
                 beta,
                 self.head_dim**-0.5,
                 self.state_cache,
                 self.qk_norm == 'l2',
-                self.use_ho_pipeline,
             )
             return out.to(orig_dtype)
 
         if mode == 'fused_recurrent':
-            out, recurrent_state = fused_recurrent_delta_rule(
+            out, recurrent_state = fused_recurrent_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
+                g=recurrent_gate,
                 beta=beta,
                 initial_state=initial_state,
                 output_final_state=output_final_state,
@@ -445,15 +456,14 @@ class DeltaNetSelfAttention(MegatronModule):
                 'q': q,
                 'k': k,
                 'v': v,
+                'g': recurrent_gate,
                 'beta': beta,
                 'scale': self.head_dim**-0.5,
                 'initial_state': initial_state,
                 'output_final_state': output_final_state,
                 'use_qk_l2norm_in_kernel': self.qk_norm == 'l2',
             }
-            if _CHUNK_DELTA_RULE_SUPPORTS_HO_PIPELINE:
-                chunk_kwargs['use_ho_pipeline'] = self.use_ho_pipeline
-            out, recurrent_state = chunk_delta_rule(**chunk_kwargs)
+            out, recurrent_state = chunk_gated_delta_rule(**chunk_kwargs)
             out = out.to(orig_dtype)
         else:
             raise NotImplementedError(f'DeltaNet mode `{mode}` is not supported.')
@@ -468,7 +478,7 @@ class DeltaNetSelfAttention(MegatronModule):
             self._clear_states()
 
         output_final_state = split_context.pipe_sp_splits > 1
-        q, k, v, g = self._project_qkvg(hidden_states)
+        q, k, v, output_gate = self._project_qkvg(hidden_states)
         hidden_states_bsh = self._hidden_states_for_beta(hidden_states)
 
         q, k, v = self._apply_short_conv(q, k, v, output_final_state=output_final_state)
@@ -487,10 +497,11 @@ class DeltaNetSelfAttention(MegatronModule):
                 device=hidden_states_bsh.device,
             )
 
-        out = self._delta_rule(q, k, v, beta, output_final_state=output_final_state)
+        recurrent_gate = self._recurrent_gate(hidden_states_bsh)
+        out = self._delta_rule(q, k, v, recurrent_gate, beta, output_final_state=output_final_state)
         if self.use_gate:
-            g = rearrange(g, 'b s (h d) -> b s h d', d=self.head_dim)
-            out = self.o_norm(out, g)
+            output_gate = rearrange(output_gate, 'b s (h d) -> b s h d', d=self.head_dim)
+            out = self.o_norm(out, output_gate)
         else:
             out = self.o_norm(out)
 
