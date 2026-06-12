@@ -75,7 +75,10 @@ class ShortConvChunkFunc(torch.autograd.Function):
             output_final_state=True,
             activation=activation,
         )
-        cache_dict[name] = final_state.detach()
+        # The cache is a Python-side boundary: final_state is not returned as a
+        # tensor argument to the next chunk's autograd Function. Backward state
+        # relay is handled explicitly through grad_dict.
+        cache_dict[name] = final_state
 
         ctx.save_for_backward(x, weight_dw, bias, initial_state)
         ctx.activation = activation
@@ -144,7 +147,10 @@ class DeltaNetChunkFunc(torch.autograd.Function):
         if _CHUNK_DELTA_RULE_FWD_SUPPORTS_HO_PIPELINE:
             fwd_kwargs['use_ho_pipeline'] = use_ho_pipeline
         o, A, final_state = chunk_delta_rule_fwd(**fwd_kwargs)
-        state_cache['recurrent_state'] = final_state.detach()
+        # Match the stateflow pattern: recurrent state is relayed through a
+        # Python dict, outside autograd's tensor-argument graph. Its gradient is
+        # passed manually via state_cache['d_state'] in backward().
+        state_cache['recurrent_state'] = final_state
 
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A)
         ctx.initial_state = initial_state
