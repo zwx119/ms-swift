@@ -20,6 +20,7 @@ class SeqSplitContext:
     pipe_sp_splits: int = 1
     start: Optional[int] = None
     end: Optional[int] = None
+    microbatch_key: int = 0
 
 
 _CURRENT_CONTEXT = SeqSplitContext()
@@ -30,6 +31,7 @@ def set_seq_split_context(
     pipe_sp_splits: int = 1,
     start: Optional[int] = None,
     end: Optional[int] = None,
+    microbatch_key: int = 0,
 ) -> None:
     """Publish the active split before calling the model."""
 
@@ -39,6 +41,7 @@ def set_seq_split_context(
         pipe_sp_splits=int(pipe_sp_splits),
         start=start,
         end=end,
+        microbatch_key=int(microbatch_key),
     )
 
 
@@ -64,6 +67,7 @@ def reset_seq_split_context() -> None:
 _SPLIT_PROGRESS = {
     'idx': 0,
     'cached_batch': None,
+    'microbatch_key': 0,
 }
 
 
@@ -78,5 +82,6 @@ def reset_split_progress() -> None:
 
     _SPLIT_PROGRESS['idx'] = 0
     _SPLIT_PROGRESS['cached_batch'] = None
+    _SPLIT_PROGRESS['microbatch_key'] = 0
     reset_seq_split_context()
 

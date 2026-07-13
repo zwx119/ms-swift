@@ -14,16 +14,21 @@ export PIPE_SP_SPLITS=${PIPE_SP_SPLITS:-4}
 # Set PACKING=false only when DATASET rows are already fixed-length SEQ_LEN samples.
 export PACKING=${PACKING:-true}
 export DELTANET_ALLOW_PACKED_SEQ=${DELTANET_ALLOW_PACKED_SEQ:-true}
-export POSITION_EMBEDDING_TYPE=${POSITION_EMBEDDING_TYPE:-none}
-export USE_FLASH_ATTN=${USE_FLASH_ATTN:-false}
-export ATTENTION_BACKEND=${ATTENTION_BACKEND:-unfused}
-# `local` keeps the input LayerNorm as a separate module, so the DeltaNet beta
-# projection sees post-LN hidden states exactly like the Megatron reference,
-# and the strided qkvg ColumnParallelLinear also works for TP>1. With
-# `transformer_engine`, the LN is fused into linear_qkvg and beta would be
-# computed from pre-LN hidden states (a different parameterization).
-export TRANSFORMER_IMPL=${TRANSFORMER_IMPL:-local}
+export POSITION_EMBEDDING_TYPE=${POSITION_EMBEDDING_TYPE:-rope}
+export USE_FLASH_ATTN=${USE_FLASH_ATTN:-true}
+export ATTENTION_BACKEND=${ATTENTION_BACKEND:-flash}
+# Keep Swift/Megatron baseline optimizations on by default: TE layer specs,
+# flash attention backend flags, and RoPE config. DeltaNet replaces the
+# self-attention module; TE still provides fused LN+linear projections and
+# TE MLP/projection modules where the layer spec supports them.
+#
+# Note: DeltaNet itself ignores rotary_pos_emb, matching the stateflow
+# DeltaNet path; POSITION_EMBEDDING_TYPE=rope keeps the surrounding Swift
+# model config aligned with the Swift baseline.
+export TRANSFORMER_IMPL=${TRANSFORMER_IMPL:-transformer_engine}
 export RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-none}
+export RECOMPUTE_METHOD=${RECOMPUTE_METHOD:-}
+export RECOMPUTE_NUM_LAYERS=${RECOMPUTE_NUM_LAYERS:-}
 export RUN_NAME=${RUN_NAME:-swift_deltanet_m2p7b_seq${SEQ_LEN:-16384}_gbs${GLOBAL_BATCH:-16}_pp${PP_SIZE:-8}tp${TP_SIZE:-1}_sp${PIPE_SP_SPLITS}}
 
 bash "${SCRIPT_DIR}/seq1f1b_swift_pp8tp1.sh"

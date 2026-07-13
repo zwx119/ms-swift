@@ -79,6 +79,27 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                     qk_layernorm=args.qk_layernorm,
                     multi_latent_attention=args.multi_latent_attention,
                     moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                    config=config,
+                    num_layers=args.num_layers,
+                    hybrid_attention_layers=getattr(args, 'deltanet_hybrid_attention_layers', ''),
+                    hybrid_attention_period=getattr(args, 'deltanet_hybrid_attention_period', 0),
+                    hybrid_attention_offset=getattr(args, 'deltanet_hybrid_attention_offset', 0),
+                )
+            elif getattr(args, 'use_mamba3', False):
+                from ...mamba3.spec import get_mamba3_gpt_layer_spec
+                transformer_layer_spec = get_mamba3_gpt_layer_spec(
+                    use_transformer_engine=use_te,
+                    normalization=args.normalization,
+                    num_experts=args.num_experts,
+                    moe_grouped_gemm=args.moe_grouped_gemm,
+                    qk_layernorm=args.qk_layernorm,
+                    multi_latent_attention=args.multi_latent_attention,
+                    moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                    config=config,
+                    num_layers=args.num_layers,
+                    hybrid_attention_layers=getattr(args, 'deltanet_hybrid_attention_layers', ''),
+                    hybrid_attention_period=getattr(args, 'deltanet_hybrid_attention_period', 0),
+                    hybrid_attention_offset=getattr(args, 'deltanet_hybrid_attention_offset', 0),
                 )
             elif args.num_experts:
                 # Define the decoder block spec

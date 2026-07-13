@@ -13,6 +13,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from swift.utils import get_logger
+from ..deltanet.context import get_seq_split_context
 from .rope import dynamic_rope_update, get_rope_inv_freq
 
 logger = get_logger()
@@ -160,6 +161,9 @@ class GPTModel(McoreGPTModel):
             else:
                 rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(inference_params, self.decoder, decoder_input,
                                                                         self.config, packed_seq_params)
+                split_context = get_seq_split_context()
+                if split_context.pipe_sp_splits > 1 and split_context.end is not None:
+                    rotary_seq_len = max(int(rotary_seq_len), int(split_context.end))
                 if self.hf_rope_scaling is not None:
                     attention_scaling = dynamic_rope_update(self, self.rotary_pos_emb.inv_freq, rotary_seq_len)
                     if attention_scaling is not None:

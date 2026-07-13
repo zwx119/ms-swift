@@ -19,7 +19,7 @@ MS_SWIFT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 # Keep official Megatron-LM separate from /opt/tiger/stateflow.
 export MEGATRON_LM_PATH=${MEGATRON_LM_PATH:-/opt/tiger/Megatron-LM-core_r0.12.0}
-export PYTHONPATH="${MS_SWIFT_ROOT}:${MEGATRON_LM_PATH}:${PYTHONPATH:-}"
+export PYTHONPATH="${MAMBA3_DIR:-}:${MS_SWIFT_ROOT}:${MEGATRON_LM_PATH}:${PYTHONPATH:-}"
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
@@ -93,6 +93,8 @@ EVAL_INTERVAL=${EVAL_INTERVAL:-100000}
 SAVE_INTERVAL=${SAVE_INTERVAL:-100000}
 NO_SAVE_MODEL=${NO_SAVE_MODEL:-true}
 RECOMPUTE_GRANULARITY=${RECOMPUTE_GRANULARITY:-none}
+RECOMPUTE_METHOD=${RECOMPUTE_METHOD:-}
+RECOMPUTE_NUM_LAYERS=${RECOMPUTE_NUM_LAYERS:-}
 EXTRA_MEGATRON_KWARGS=${EXTRA_MEGATRON_KWARGS:-'{"init_method_std": 0.006, "initial_loss_scale": 65536}'}
 PACKING=${PACKING:-true}
 POSITION_EMBEDDING_TYPE=${POSITION_EMBEDDING_TYPE:-rope}
@@ -100,6 +102,7 @@ USE_FLASH_ATTN=${USE_FLASH_ATTN:-true}
 ATTENTION_BACKEND=${ATTENTION_BACKEND:-flash}
 TRANSFORMER_IMPL=${TRANSFORMER_IMPL:-transformer_engine}
 USE_DELTANET=${USE_DELTANET:-false}
+USE_MAMBA3=${USE_MAMBA3:-false}
 PIPE_SP_SPLITS=${PIPE_SP_SPLITS:-1}
 DELTANET_MODE=${DELTANET_MODE:-chunk}
 DELTANET_USE_SHORT_CONV=${DELTANET_USE_SHORT_CONV:-true}
@@ -109,13 +112,26 @@ DELTANET_USE_OUTPUT_GATE=${DELTANET_USE_OUTPUT_GATE:-true}
 DELTANET_QK_ACTIVATION=${DELTANET_QK_ACTIVATION:-silu}
 DELTANET_QK_NORM=${DELTANET_QK_NORM:-l2}
 DELTANET_ALLOW_PACKED_SEQ=${DELTANET_ALLOW_PACKED_SEQ:-false}
+DELTANET_RNN_SP1_BASELINE=${DELTANET_RNN_SP1_BASELINE:-false}
+MAMBA3_DIR=${MAMBA3_DIR:-/opt/tiger/stateflow/third_party_ref/mamba}
+MAMBA3_D_STATE=${MAMBA3_D_STATE:-128}
+MAMBA3_EXPAND=${MAMBA3_EXPAND:-2}
+MAMBA3_HEAD_DIM=${MAMBA3_HEAD_DIM:-64}
+MAMBA3_NGROUPS=${MAMBA3_NGROUPS:-1}
+MAMBA3_ROPE_FRACTION=${MAMBA3_ROPE_FRACTION:-0.5}
+MAMBA3_CHUNK_SIZE=${MAMBA3_CHUNK_SIZE:-64}
+MAMBA3_MIMO_RANK=${MAMBA3_MIMO_RANK:-4}
+MAMBA3_OUTPROJ_NORM=${MAMBA3_OUTPROJ_NORM:-false}
+MAMBA3_IS_MIMO=${MAMBA3_IS_MIMO:-false}
 
 TP_SIZE=${TP_SIZE:-1}
 PP_SIZE=${PP_SIZE:-8}
 NUM_LAYERS=${NUM_LAYERS:-32}
 HIDDEN_SIZE=${HIDDEN_SIZE:-2560}
 NUM_HEADS=${NUM_HEADS:-32}
+NUM_QUERY_GROUPS=${NUM_QUERY_GROUPS:-${NUM_HEADS}}
 FFN_HIDDEN_SIZE=${FFN_HIDDEN_SIZE:-10240}
+SWIGLU=${SWIGLU:-false}
 PADDED_VOCAB_SIZE=${PADDED_VOCAB_SIZE:-50304}
 
 LR=${LR:-3e-4}
@@ -190,7 +206,9 @@ padded_vocab_size = int("${PADDED_VOCAB_SIZE}")
 hidden_size = int("${HIDDEN_SIZE}")
 num_layers = int("${NUM_LAYERS}")
 num_heads = int("${NUM_HEADS}")
+num_query_groups = int("${NUM_QUERY_GROUPS}")
 ffn_hidden_size = int("${FFN_HIDDEN_SIZE}")
+swiglu = "${SWIGLU}".lower() in {"1", "true", "yes", "on"}
 
 config = {
     "architectures": ["LlamaForCausalLM"],
@@ -200,12 +218,12 @@ config = {
     "intermediate_size": ffn_hidden_size,
     "num_hidden_layers": num_layers,
     "num_attention_heads": num_heads,
-    "num_key_value_heads": num_heads,
+    "num_key_value_heads": num_query_groups,
     "max_position_embeddings": seq_len,
     "rms_norm_eps": 1e-5,
     "rope_theta": 10000,
     "tie_word_embeddings": False,
-    "hidden_act": "gelu",
+    "hidden_act": "silu" if swiglu else "gelu",
     "attention_bias": True,
     "mlp_bias": True,
     "attention_dropout": 0.0,
@@ -244,24 +262,39 @@ echo "  MODEL_DIR=${MODEL_DIR}"
 echo "  SAVE=${SAVE}"
 echo "  SAVE_INTERVAL=${SAVE_INTERVAL}, NO_SAVE_MODEL=${NO_SAVE_MODEL}"
 echo "  GPUs=${NPROC_PER_NODE}, PP=${PP_SIZE}, TP=${TP_SIZE}, DP=${DP_SIZE}"
-echo "  model: L=${NUM_LAYERS}, H=${HIDDEN_SIZE}, heads=${NUM_HEADS}, ffn=${FFN_HIDDEN_SIZE}"
+echo "  model: L=${NUM_LAYERS}, H=${HIDDEN_SIZE}, heads=${NUM_HEADS}, kv_heads=${NUM_QUERY_GROUPS}, ffn=${FFN_HIDDEN_SIZE}, swiglu=${SWIGLU}"
 echo "  seq_len=${SEQ_LEN}, micro=${MICRO_BATCH}, global=${GLOBAL_BATCH}, iters=${TRAIN_ITERS}"
 echo "  num_microbatches=${NUM_MICROBATCHES}, gradient_accumulation_steps=${GRADIENT_ACCUMULATION_STEPS}"
 if [ "${USE_DELTANET}" = "true" ]; then
   echo "  seq1f1b_pipeline_chunks=$((NUM_MICROBATCHES * PIPE_SP_SPLITS))"
 fi
-echo "  recompute_granularity=${RECOMPUTE_GRANULARITY}"
+echo "  recompute_granularity=${RECOMPUTE_GRANULARITY}, method=${RECOMPUTE_METHOD:-NA}, num_layers=${RECOMPUTE_NUM_LAYERS:-NA}"
 echo "  packing=${PACKING}, position_embedding_type=${POSITION_EMBEDDING_TYPE}"
-echo "  use_deltanet=${USE_DELTANET}, pipe_sp_splits=${PIPE_SP_SPLITS}, deltanet_mode=${DELTANET_MODE}"
+echo "  use_deltanet=${USE_DELTANET}, use_mamba3=${USE_MAMBA3}, pipe_sp_splits=${PIPE_SP_SPLITS}, deltanet_mode=${DELTANET_MODE}"
+echo "  pipe_sp_strategy=${PIPE_SP_STRATEGY:-average}, manual_splits=${PIPE_SP_MANUAL_SPLITS:-}"
+echo "  deltanet_rnn_sp1_baseline=${DELTANET_RNN_SP1_BASELINE}"
+echo "  deltanet_hybrid_attention_layers=${DELTANET_HYBRID_ATTENTION_LAYERS:-}"
+echo "  deltanet_hybrid_attention_period=${DELTANET_HYBRID_ATTENTION_PERIOD:-0}, offset=${DELTANET_HYBRID_ATTENTION_OFFSET:-0}"
 echo "  extra_megatron_kwargs=${EXTRA_MEGATRON_KWARGS}"
 echo "  summary_skip=${SUMMARY_SKIP}"
 echo "======================================================================"
 
 DELTANET_ARGS=()
+MAMBA3_ARGS=()
+RECOMPUTE_ARGS=(--recompute_granularity "${RECOMPUTE_GRANULARITY}")
+if [ -n "${RECOMPUTE_METHOD}" ]; then
+  RECOMPUTE_ARGS+=(--recompute_method "${RECOMPUTE_METHOD}")
+fi
+if [ -n "${RECOMPUTE_NUM_LAYERS}" ]; then
+  RECOMPUTE_ARGS+=(--recompute_num_layers "${RECOMPUTE_NUM_LAYERS}")
+fi
+
 if [ "${USE_DELTANET}" = "true" ]; then
   DELTANET_ARGS+=(
     --use_deltanet true
     --pipe_sp_splits "${PIPE_SP_SPLITS}"
+    --pipe_sp_strategy "${PIPE_SP_STRATEGY:-average}"
+    --pipe_sp_manual_splits "${PIPE_SP_MANUAL_SPLITS:-}"
     --deltanet_mode "${DELTANET_MODE}"
     --deltanet_use_short_conv "${DELTANET_USE_SHORT_CONV}"
     --deltanet_conv_size "${DELTANET_CONV_SIZE}"
@@ -270,10 +303,39 @@ if [ "${USE_DELTANET}" = "true" ]; then
     --deltanet_qk_activation "${DELTANET_QK_ACTIVATION}"
     --deltanet_qk_norm "${DELTANET_QK_NORM}"
     --deltanet_allow_packed_seq "${DELTANET_ALLOW_PACKED_SEQ}"
+    --deltanet_rnn_sp1_baseline "${DELTANET_RNN_SP1_BASELINE}"
+    --deltanet_hybrid_attention_layers "${DELTANET_HYBRID_ATTENTION_LAYERS:-}"
+    --deltanet_hybrid_attention_period "${DELTANET_HYBRID_ATTENTION_PERIOD:-0}"
+    --deltanet_hybrid_attention_offset "${DELTANET_HYBRID_ATTENTION_OFFSET:-0}"
   )
 fi
 
-megatron pt \
+if [ "${USE_MAMBA3}" = "true" ]; then
+  MAMBA3_ARGS+=(
+    --use_mamba3 true
+    --pipe_sp_splits "${PIPE_SP_SPLITS}"
+    --pipe_sp_strategy "${PIPE_SP_STRATEGY:-average}"
+    --pipe_sp_manual_splits "${PIPE_SP_MANUAL_SPLITS:-}"
+    --deltanet_hybrid_attention_layers "${DELTANET_HYBRID_ATTENTION_LAYERS:-}"
+    --deltanet_hybrid_attention_period "${DELTANET_HYBRID_ATTENTION_PERIOD:-0}"
+    --deltanet_hybrid_attention_offset "${DELTANET_HYBRID_ATTENTION_OFFSET:-0}"
+    --mamba3_d_state "${MAMBA3_D_STATE}"
+    --mamba3_expand "${MAMBA3_EXPAND}"
+    --mamba3_head_dim "${MAMBA3_HEAD_DIM}"
+    --mamba3_ngroups "${MAMBA3_NGROUPS}"
+    --mamba3_rope_fraction "${MAMBA3_ROPE_FRACTION}"
+    --mamba3_chunk_size "${MAMBA3_CHUNK_SIZE}"
+    --mamba3_mimo_rank "${MAMBA3_MIMO_RANK}"
+  )
+  if [ "${MAMBA3_OUTPROJ_NORM}" = "true" ]; then
+    MAMBA3_ARGS+=(--mamba3_outproj_norm true)
+  fi
+  if [ "${MAMBA3_IS_MIMO}" = "true" ]; then
+    MAMBA3_ARGS+=(--mamba3_is_mimo true)
+  fi
+fi
+
+${PYTHON:-python3} -m swift.cli._megatron.main pt \
   --model "${MODEL_DIR}" \
   --model_type llama \
   --dataset "${DATASET}" \
@@ -288,14 +350,14 @@ megatron pt \
   --hidden_size "${HIDDEN_SIZE}" \
   --ffn_hidden_size "${FFN_HIDDEN_SIZE}" \
   --num_attention_heads "${NUM_HEADS}" \
-  --num_query_groups "${NUM_HEADS}" \
+  --num_query_groups "${NUM_QUERY_GROUPS}" \
   --padded_vocab_size "${PADDED_VOCAB_SIZE}" \
   --seq_length "${SEQ_LEN}" \
   --max_length "${SEQ_LEN}" \
   --max_position_embeddings "${SEQ_LEN}" \
   --position_embedding_type "${POSITION_EMBEDDING_TYPE}" \
   --normalization LayerNorm \
-  --swiglu false \
+  --swiglu "${SWIGLU}" \
   --disable_bias_linear false \
   --add_qkv_bias true \
   --untie_embeddings_and_output_weights true \
@@ -309,7 +371,8 @@ megatron pt \
   --use_distributed_optimizer true \
   --cross_entropy_loss_fusion true \
   "${DELTANET_ARGS[@]}" \
-  --recompute_granularity "${RECOMPUTE_GRANULARITY}" \
+  "${MAMBA3_ARGS[@]}" \
+  "${RECOMPUTE_ARGS[@]}" \
   --train_iters "${TRAIN_ITERS}" \
   --eval_iters "${EVAL_ITERS}" \
   --eval_interval "${EVAL_INTERVAL}" \

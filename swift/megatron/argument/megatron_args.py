@@ -223,6 +223,8 @@ class MegatronArguments(ExtraMegatronArguments):
     # DeltaNet / Seq1F1B experiments
     use_deltanet: bool = False
     pipe_sp_splits: int = 1
+    pipe_sp_strategy: Literal['average', 'manual'] = 'average'
+    pipe_sp_manual_splits: str = ''
     deltanet_mode: Literal['chunk', 'fused_recurrent'] = 'chunk'
     deltanet_use_short_conv: bool = True
     deltanet_conv_size: int = 4
@@ -232,6 +234,27 @@ class MegatronArguments(ExtraMegatronArguments):
     deltanet_qk_norm: Literal['l2', 'none'] = 'l2'
     deltanet_fused_h_o_pipeline: bool = False
     deltanet_allow_packed_seq: bool = False
+    deltanet_rnn_sp1_baseline: bool = False
+    deltanet_hybrid_attention_layers: str = ''
+    deltanet_hybrid_attention_period: int = 0
+    deltanet_hybrid_attention_offset: int = 0
+
+    # Mamba3 / Seq1F1B experiments
+    use_mamba3: bool = False
+    mamba3_d_state: int = 128
+    mamba3_expand: int = 2
+    mamba3_head_dim: int = 64
+    mamba3_ngroups: int = 1
+    mamba3_rope_fraction: float = 0.5
+    mamba3_chunk_size: int = 64
+    mamba3_dt_min: float = 0.001
+    mamba3_dt_max: float = 0.1
+    mamba3_dt_init_floor: float = 1e-4
+    mamba3_a_floor: float = 1e-4
+    mamba3_outproj_norm: bool = False
+    mamba3_is_mimo: bool = False
+    mamba3_mimo_rank: int = 4
+    mamba3_fuse_pregate_headwise_norm: bool = True
 
     # extra_args for megatron
     extra_megatron_kwargs: Optional[Union[dict, str]] = None
@@ -330,23 +353,55 @@ class MegatronArguments(ExtraMegatronArguments):
             self.eval_interval = self.save_interval
         if self.seq_length is None:
             self.seq_length = self.max_position_embeddings
-        if self.use_deltanet:
+        if self.use_deltanet or self.use_mamba3:
             if self.pipe_sp_splits < 1:
                 raise ValueError('`pipe_sp_splits` must be >= 1.')
-            if self.pipe_sp_splits > 1 and self.seq_length % self.pipe_sp_splits != 0:
-                raise ValueError('`seq_length` must be divisible by `pipe_sp_splits` for DeltaNet Seq1F1B.')
+            if self.pipe_sp_strategy == 'average':
+                if self.pipe_sp_splits > 1 and self.seq_length % self.pipe_sp_splits != 0:
+                    raise ValueError('`seq_length` must be divisible by `pipe_sp_splits` for average Seq1F1B.')
+            elif self.pipe_sp_strategy == 'manual':
+                splits = [int(item.strip()) for item in self.pipe_sp_manual_splits.split(',') if item.strip()]
+                if len(splits) != self.pipe_sp_splits:
+                    raise ValueError('`pipe_sp_manual_splits` must contain exactly `pipe_sp_splits` entries.')
+                if any(split <= 0 for split in splits):
+                    raise ValueError('`pipe_sp_manual_splits` entries must be positive.')
+                if sum(splits) != self.seq_length:
+                    raise ValueError('`pipe_sp_manual_splits` must sum to `seq_length`.')
+                if self.seq_length % 128 == 0 and any(split % 128 != 0 for split in splits):
+                    raise ValueError('`pipe_sp_manual_splits` entries must be multiples of 128.')
+            else:
+                raise ValueError('`pipe_sp_strategy` must be `average` or `manual`.')
             if self.pipe_sp_splits > 1 and getattr(self, 'packing', False) and 128 % self.pipe_sp_splits != 0:
                 # Swift's Megatron collator pads each packed microbatch to a
                 # multiple of 128 tokens (not to a fixed seq_length), so every
                 # per-batch length is only guaranteed to be divisible by 128.
                 raise ValueError('With `--packing true`, `pipe_sp_splits` must divide 128 '
                                  '(e.g. 2/4/8/16) so every packed batch can be split evenly.')
-            if self.pipe_sp_splits > 1 and self.recompute_granularity == 'full':
+            allow_seq1f1b_full_recompute = os.environ.get('DELTANET_ALLOW_SEQ1F1B_FULL_RECOMPUTE', '1').lower() in {
+                '1', 'true', 'yes', 'on'
+            }
+            if (
+                self.pipe_sp_splits > 1
+                and self.recompute_granularity == 'full'
+                and not allow_seq1f1b_full_recompute
+                and not self.deltanet_rnn_sp1_baseline
+            ):
                 # Full recompute replays the layer forward during backward, which
-                # would re-consume/overwrite the cross-chunk recurrent state and
-                # short-conv caches used by the Seq1F1B state relay.
-                raise ValueError('DeltaNet Seq1F1B (`pipe_sp_splits` > 1) is incompatible with '
+                # can re-consume/overwrite the cross-chunk recurrent state and
+                # short-conv caches used by the Seq1F1B state relay unless the
+                # DeltaNet attention implementation snapshots those states. RNN-SP1
+                # baseline runs DeltaNet on the full sequence inside each grouped
+                # layer, so it has no cross-chunk recurrent state relay to replay.
+                raise ValueError('Seq1F1B (`pipe_sp_splits` > 1) is incompatible with '
                                  '`--recompute_granularity full`. Use `none` (or `selective`).')
+            if self.deltanet_rnn_sp1_baseline and self.pipe_sp_splits <= 1:
+                raise ValueError('`deltanet_rnn_sp1_baseline` requires `pipe_sp_splits > 1`.')
+            if self.deltanet_rnn_sp1_baseline and self.pipe_sp_strategy != 'average':
+                raise ValueError('`deltanet_rnn_sp1_baseline` currently supports only average Seq1F1B splits.')
+            if self.deltanet_hybrid_attention_period < 0:
+                raise ValueError('`deltanet_hybrid_attention_period` must be >= 0.')
+            if self.deltanet_hybrid_attention_offset < 0:
+                raise ValueError('`deltanet_hybrid_attention_offset` must be >= 0.')
             if getattr(self, 'packing', False) and not self.deltanet_allow_packed_seq:
                 logger.warning('DeltaNet recurrent state does not reset at Swift packing boundaries yet. '
                                'Please run DeltaNet scripts with `--packing false` for correctness.')
